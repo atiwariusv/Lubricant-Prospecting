@@ -9,75 +9,17 @@ import pandas as pd
 import pyodbc
 import numpy as np
 import datetime
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.ensemble import IsolationForest
+import seaborn as sns
+from sklearn.model_selection  import train_test_split
+from sklearn.cluster import KMeans
+import sklearn.metrics
+#Finding optimal no. of clusters
+from scipy.spatial.distance import cdist
 
-infogroup_file = pd.read_csv('infogroup_raw_file.csv',dtype=str)
-infogroup_file.columns
-
-infogroup_subset = infogroup_file
-infogroup_subset.CustomerKey = infogroup_subset.CustomerKey.str[1:]
-
-#infogroup_subset_wo_pe = infogroup_subset[infogroup_subset.division != 'PE']
-#infogroup_subset_pe = infogroup_subset[infogroup_subset.division == 'PE']
-#infogroup_subset_pe.CustomerKey =infogroup_subset_pe.CustomerKey.apply(lambda x: '{0:0>6}'.format(x))
-##merge in both the dfs
-#
-#infogroup_subset = pd.concat([infogroup_subset_wo_pe, infogroup_subset_pe], axis = 0)
-#read in the oil customers 
-#Connect to the SQLPDW Database
-cnxn = pyodbc.connect("Driver={SQL Server Native Client 11.0};"
-                      "Server=SQLPDW,1433;"
-                      "Database=USVBIAnalytics;"
-                      "Trusted_Connection=yes;")
-
-   
-oil_cust = pd.read_sql('SELECT CAST(\'Oil\' as varchar(50)) AS Source, CustomerKey AS info_key, \
-                       CustomerAccountId AS sourceid FROM USVBIAnalytics.DWOil.vwDimCustomer', cnxn)
-
-af_cust = pd.read_sql('SELECT CAST(\'AutoForce\' as varchar(50)) AS Source, CustomerKey AS info_key, \
-                       CustomerID AS sourceid FROM USVBIAnalytics.DWAF.vwDimCustomer', cnxn)
-
-gain_cust = pd.read_sql('SELECT CAST(\'Gain\' as varchar(50)) AS Source, CustomerKey AS info_key, \
-                       CustomerID AS sourceid FROM USVBIAnalytics.DWGain.vwDimCustomer', cnxn)
-
-#Connect to the PE Ventus Database
-cnxn = pyodbc.connect("Driver={SQL Server Native Client 11.0};"
-                      "Server=APPWS131,1433;"
-                      "Database=Ventus-USPE;"
-                      "Trusted_Connection=yes;")
-
-pe_cust = pd.read_sql('SELECT CAST(\'PE\' as varchar(50)) AS Source, CustomerNo AS info_key, \
-                       CustomerNo AS sourceid FROM [Ventus-USPE].AR.Customer', cnxn)
-
-#Connect to the P21Prod Database
-cnxn = pyodbc.connect("Driver={SQL Server Native Client 11.0};"
-                      "Server=USVSQLP08B\SQLP08B,1433;"
-                      "Database=P21Prod;"
-                      "Trusted_Connection=yes;")
-
-lubricants_cust = pd.read_sql('SELECT CAST(\'Lubricants (half)\' as varchar(50)) AS Source, customer_id AS info_key, \
-                       customer_id AS sourceid FROM P21Prod.dbo.p21_customer_view', cnxn)
-
-
-#Combine all the IDs
-all_ids_combined = pd.concat([af_cust, oil_cust], axis= 0)
-all_ids_combined = pd.concat([all_ids_combined, pe_cust], axis= 0)
-all_ids_combined = pd.concat([all_ids_combined, gain_cust], axis= 0)
-all_ids_combined = pd.concat([all_ids_combined, lubricants_cust], axis= 0)
-
-all_ids_combined.info_key = all_ids_combined.info_key.astype(str)
-all_ids_combined[['info_key','decimal_del']] = all_ids_combined['info_key'].str.split('.',expand=True)
-all_ids_combined.drop(['decimal_del'], axis = 1, inplace = True) 
-#merge in the infogroup with the all ids to get the sourceid linked to the customers
-infogroup_sourceid = pd.merge(infogroup_subset, all_ids_combined, left_on = ['division','CustomerKey'], 
-                              right_on = ['Source', 'info_key'], how ='outer')
-infogroup_sourceid = infogroup_sourceid.dropna(axis=0, how='all', subset=['CustomerKey','division'])
-infogroup_sourceid.drop(['Source','info_key'], axis = 1, inplace = True)
-
-#drop all the rows where the sourceid is nan . these source ids are all from pe
-infogroup_sourceid.dropna(subset=['sourceid'], inplace =True)
-
-infogroup_sourceid.division = np.where(infogroup_sourceid.division == 'AutoForce', 'AF',infogroup_sourceid.division)
-infogroup_sourceid.division = np.where(infogroup_sourceid.division == 'Lubricants (half)', 'Lubes',infogroup_sourceid.division)
+lubes_pcmo_cust = pd.read_csv('consolidated_customers.csv')
 
 #link it to  unique CustomerKey
 #Read in the SQL Query for DIM Customers
@@ -92,261 +34,253 @@ cnxn = pyodbc.connect('Driver={ODBC Driver 13 for SQL Server}; \
 
 #Read in the Customer list from Azure Dim Customers. 
 dim_cust_list = pd.read_sql(dim_cust_query, cnxn)
-infogroup_sourceid.sourceid = infogroup_sourceid.sourceid. astype(str)
-infogroup_sourceid[['sourceid','decimal_del']] = infogroup_sourceid['sourceid'].str.split('.',expand=True)
 
-temp = pd.merge(infogroup_sourceid, dim_cust_list, left_on = ['division', 'sourceid'], right_on = ['Source','SourceSystemID'], how='left')
-del pe_cust, oil_cust, lubricants_cust, gain_cust, af_cust
+lubes_pcmo_cust.sourcesystemid = lubes_pcmo_cust.sourcesystemid.astype(str).apply(lambda x: x.zfill(6))
 
-
-#Read in the de-dupe file from Colin
-dedup_file = pd.read_csv('dedupe_list_from_colin.csv')
-
-#Merge on the above tables so that we now can link the actual Customer IDs 
-#to the newly created ones
-infogroup_enterprise_key = pd.merge(temp, dedup_file, 
-                                left_on=['CustomerKey_y'], 
-                                right_on = ['CustomerKey (DimCustomer)'], 
-                                how='left')
-infogroup_enterprise_key['CustomerEnterpriseKey'] = 'A' + infogroup_enterprise_key['CustomerEnterpriseKey'].astype(str)
-infogroup_enterprise_key['CustomerEnterpriseKey'] = infogroup_enterprise_key['CustomerEnterpriseKey'].str[:-2]
-
-infogroup_enterprise_key['BE Primary SIC Code'] = infogroup_enterprise_key['BE Primary SIC Code'].astype(str)
-infogroup_enterprise_key['BE Primary SIC Code'] = infogroup_enterprise_key['BE Primary SIC Code'].str[:4]
-infogroup_enterprise_key['BE NAICS Code8'] = infogroup_enterprise_key['BE NAICS Code8'].astype(str)
-infogroup_enterprise_key['BE NAICS Code8'] = infogroup_enterprise_key['BE NAICS Code8'].str[:6]
-infogroup_enterprise_key = infogroup_enterprise_key.drop_duplicates(subset='CustomerEnterpriseKey', keep='first')
-#infogroup_enterprise_key = infogroup_enterprise_key[['CustomerEnterpriseKey','BE Primary SIC Code', 'BE NAICS Code8']]
-
-#pivot on customer enterprise key
-customer_master_file = pd.read_csv('customer_master_file_delete.csv')
-final_file = pd.merge(customer_master_file, infogroup_enterprise_key, left_on = 'CustomerEnterpriseKey', right_on = 'CustomerEnterpriseKey', how='left')
-final_file.rename(columns = {'sourceid_0':'SourceID'},inplace=True)
-final_file = final_file.loc[:, ~final_file.columns.str.startswith('sourceid_')]
-
-#save the final_file into csv
-final_file.to_csv('lubes_prospectingv2.csv')
-
-#############################################################################
-import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.ensemble import IsolationForest
-import seaborn as sns
-import matplotlib.pyplot as plt
-from pandas import Series, DataFrame
-import pandas as pd
-import os
-from sklearn.model_selection  import train_test_split
-from sklearn.cluster import KMeans
-import sklearn.metrics
-#Finding optimal no. of clusters
-from scipy.spatial.distance import cdist
+lubes_cust_w_customerkeys = pd.merge(lubes_pcmo_cust, dim_cust_list, left_on = ['source','sourcesystemid'], 
+                                     right_on = ['Source','SourceSystemID'], how = 'left')
 
 
-prospecting_table = pd.read_csv('lubes_prospectingv2.csv')
-prospecting_table.dropna(subset=['CustomerGroup'],inplace=True)
+lubes_cust_w_customerkeys.dropna(subset = ['CustomerKey'], axis = 0, inplace = True)
+
+
+#read in dedupe list from colin to assign the enterprise keys
+colins_dedupe_list = pd.read_csv('dedupe_list_from_colin.csv')
+
+#merge in the lubes_cust_w_customerkeys with colins list to link the enterprise keys. 
+#infogroup records are arranged by enterprise keys.
+lubes_customerenterprisekeys = pd.merge(lubes_cust_w_customerkeys, colins_dedupe_list, left_on = 'CustomerKey', 
+                                        right_on = 'CustomerKey (DimCustomer)', how = 'left')
+
+lubes_customerenterprisekeys['CustomerEnterpriseKey'] = 'A' + lubes_customerenterprisekeys['CustomerEnterpriseKey'].astype(str)
+lubes_customerenterprisekeys[['CustomerEnterpriseKey', 'drop']] = lubes_customerenterprisekeys['CustomerEnterpriseKey'].str.split('.',expand=True)
+#now we read in infogroup file
+infogroup_file = pd.read_csv('2019_03_20_IG_File_Marketing_Fields_Matchup_to_USV_Customer_Master_File - Copy.csv', encoding = "ISO-8859-1")
+
+#now we merge in the 
+lubes_ig = pd.merge(lubes_customerenterprisekeys, infogroup_file, left_on = 'CustomerEnterpriseKey', 
+                    right_on = 'CustomerEnterpriseKey', how = 'left')
+
+
+lubes_ig['BE_Primary_SIC_Code'] = lubes_ig['BE_Primary_SIC_Code'].astype(str)
+lubes_ig['BE_Primary_SIC_Code'] = lubes_ig['BE_Primary_SIC_Code'].str[:4]
+lubes_ig['BE_NAICS_Code8'] = lubes_ig['BE_NAICS_Code8'].astype(str)
+lubes_ig['BE_NAICS_Code8'] = lubes_ig['BE_NAICS_Code8'].str[:6]
+lubes_ig = lubes_ig.drop_duplicates(subset='CustomerEnterpriseKey', keep='first')
+
+prospecting_table = lubes_ig
+
 #prospecting_table.dropna(subset = ['CustomerGroup'], inplace = True)
 
 #data cleanup
-prospecting_table.drop(['Lubes Customer','AF Cust'],axis=1,inplace= True)
-prospecting_table.drop(['SeqCntNum','CustomerName_x','addressType','addressLine','addressLine2', 'customerPhone',
-                        'BE Match Level', ], axis=1, inplace= True)
-    
-#drop the industrial customers
-industrial_customers = ['A45830', 'A48848', 'A48653', 'A61582', 'A61315', 'A22554']
-prospecting_table = prospecting_table[~prospecting_table.CustomerEnterpriseKey.isin(industrial_customers)]
+prospecting_table = prospecting_table.drop(prospecting_table.columns[2:17],1)
 
-prospecting_table = prospecting_table[prospecting_table['country'] == 'United States']
-prospecting_table.drop(['country','BE Match Score','BE Contact Manager','BE Primary Address',
-                        'BE Primary City Name','BE Primary State Abbreviation','BE Primary ZIP Code','BE Primary ZIP4 Code',
-                        'BE Primary State Code','BE Selected SIC Description','BE Secondary SIC Description 1',
-                        'BE Secondary SIC Description 3', 'BE Secondary SIC Description 4', 'BE NAICS Description',
-                        'BE Location Employment Size Description','BE Production Date','BE Obsolescence Date', 'BE Production Date Formatted', 
-                        'BE Source', 'BE Book Number', 'decimal_del'], axis=1, inplace= True)
+prospecting_table.drop(['MailingAddress2', 'MailingCity', 'MailingState', 
+                        'ZipCode', 'Zip4', 'MailingCountry', 'BE_Match_Level', 
+                        'BE_Match_Score', 'BE_Record_Type_Code', 'BE_Contact_Manager','BE_Selected_SIC_Description', 
+                        'BE_Franchise_Specialty_Description1', 'BE_Franchise_Specialty_Description2', 
+                        'BE_Franchise_Specialty_Description3', 'BE_Franchise_Specialty_Description4', 
+                        'BE_Franchise_Specialty_Description5', 'BE_Franchise_Specialty_Code6',
+                        'BE_Franchise_Specialty_Description6', 'BE_Primary_SIC_Description', 
+                        'BE_Secondary_SIC_Description_1', 'BE_Secondary_SIC_Description_2', 
+                        'BE_Secondary_SIC_Description_3', 'BE_Secondary_SIC_Description_4', 
+                        'BE_NAICS_Description', 'BE_Location_Employment_Size_Description', 
+                        'BE_Corporate_Employment_Size_Description', 'BE_Selected_SIC_Code'], axis = 1, inplace = True)
+
+
+#drop additional columns that were dropped in the previous iteration
+prospecting_table.drop(['BE_Production_Date','BE_Obsolescence_Date', 'BE_Production_Date_Formatted', 
+                        'BE_Source', 'BE_Book_Number'], axis=1, inplace= True)
     
 #Dropping the lubes variables because the customers that we are interested in as prospects wont have any Lubes sales
-prospecting_table = prospecting_table.loc[:, ~prospecting_table.columns.str.startswith('Lubes_')]
-prospecting_table = prospecting_table.loc[:, ~prospecting_table.columns.str.startswith('BE Contact')]
+prospecting_table = prospecting_table.loc[:, ~prospecting_table.columns.str.startswith('BE_Contact')]
 prospecting_table.dropna(thresh=prospecting_table.shape[0]*0.5, how='all', axis=1, inplace = True)
 
 #recode the fields 'BE_Year_SIC_Added_to_Record', 'BE Year First Appeared in Yellow Pages', 'BE Year Established', '
-prospecting_table['BE_yellow_pages_number_of_years'] = 2019 - prospecting_table['BE Year First Appeared in Yellow Pages']
+prospecting_table['BE_yellow_pages_number_of_years'] = 2019 - prospecting_table['BE_Year_First_Appeared_in_Yellow_Pages']
 
 #subsequently drop the above fields
-prospecting_table.drop(['BE Year First Appeared in Yellow Pages'],axis=1,inplace=True)
+prospecting_table.drop(['BE_Year_First_Appeared_in_Yellow_Pages'],axis=1,inplace=True)
 
-prospecting_table['Customer_yr_start'] = 2019 - prospecting_table['FirstInvoiceDate'].str[-4:].astype(float)
-prospecting_table.drop(['FirstInvoiceDate', 'LastInvoiceDate'], axis = 1, inplace = True)
-prospecting_table.drop(['BE Company Name', 'BE Primary ZIP Code Plus 4', 'BE Telephone NumberF1', 
-                        'BE Primary SIC Description','BE ABI Number', 'BE Site Number', 'BE Tele Research Date',
-                        'BE Call Status Code', 'BE Call Status Description', 'BE Business Credit Score Description', 
-                        'BE Delivery Point Bar Code','Source','CustomerName_y','CustomerPhone','CustomerName', 
-                        'sourceid', 'SourceSystemID','CustomerKey (DimCustomer)', 'SourceID', 'CustomerKey_x', 'division',
-                        'zipCode'], axis = 1, inplace = True)
 
-#states
-sizes = prospecting_table['state'].value_counts()
-low_states = sizes.index[sizes < prospecting_table.shape[0]*0.01]
-prospecting_table.loc[prospecting_table['state'].isin(low_states), 'state'] = "other_states"
-state_dummy = pd.get_dummies(prospecting_table.state, drop_first=True)
-state_dummy.columns = ['state_' + str(col) for col in state_dummy.columns]
-prospecting_table = pd.concat([prospecting_table,state_dummy], axis = 1)
+prospecting_table.drop(['CustomerPhone_y', 'BE_Site_Number', 'BE_Tele_Research_Date',
+                        'BE_Call_Status_Code','BE_Call_Status_Description',
+                        'BE_Business_Credit_Score_Description', 'BE_Delivery_Point_Bar_Code'], axis = 1, inplace = True)
 
-#cities
-sizes = prospecting_table['city'].value_counts()
-low_cities = sizes.index[sizes < prospecting_table.shape[0]*0.01]
-prospecting_table.loc[prospecting_table['city'].isin(low_cities), 'city'] = "other_cities"
-city_dummy = pd.get_dummies(prospecting_table.city, drop_first=True)
-city_dummy.columns = ['city_' + str(col) for col in city_dummy.columns]
-prospecting_table = pd.concat([prospecting_table,city_dummy], axis = 1)
+#drop the geographic information since this  information will not matter if prospecting in a different territory
+prospecting_table.drop(['BE_Primary_Address', 'BE_Primary_City_Name', 'BE_Primary_State_Abbreviation', 
+                        'BE_Primary_ZIP_Code', 'BE_Primary_ZIP4_Code', 'BE_Primary_ZIP_Code_Plus_4', 
+                        'BE_Primary_Carrier_Route_Code', 'BE_Primary_State_Code', 
+                        'BE_County_Code', 'BE_County_Description', 'BE_CBSA_Code', 'BE_CBSA_Description', 
+                        'BE_CSA_Code'], axis = 1, inplace = True)
+    
+    
+#add in the abi number and the related fields   
+sizes = prospecting_table['BE_ABI_Number'].value_counts()
+low_abi = sizes.index[sizes < prospecting_table.shape[0]*0.01]
+prospecting_table.loc[prospecting_table['BE_ABI_Number'].isin(low_abi), 'BE_ABI_Number'] = "other_abi_busiinesses"
+abi_dummy = pd.get_dummies(prospecting_table.BE_ABI_Number, drop_first=True)
+abi_dummy.columns = ['abi_' + str(col) for col in abi_dummy.columns]
+prospecting_table = pd.concat([prospecting_table,abi_dummy], axis = 1)
 
-#county desc
-sizes = prospecting_table['BE County Description'].value_counts()
-low_counties = sizes.index[sizes < prospecting_table.shape[0]*0.05]
-prospecting_table.loc[prospecting_table['BE County Description'].isin(low_counties), 
-                      'BE County Description'] = "other_counties"
-counties_dummy = pd.get_dummies(prospecting_table['BE County Description'], drop_first=True)
-counties_dummy.columns = ['counties_' + str(col) for col in counties_dummy.columns]
-prospecting_table = pd.concat([prospecting_table,counties_dummy], axis = 1)
-
-#cbsa code
-sizes = prospecting_table['BE CBSA Code'].value_counts()
-low_cbsa_codes = sizes.index[sizes < prospecting_table.shape[0]*0.01]
-prospecting_table.loc[prospecting_table['BE CBSA Code'].isin(low_cbsa_codes), 
-                      'BE CBSA Code'] = "other_cbsa_codes"
-cbsa_dummy = pd.get_dummies(prospecting_table['BE CBSA Code'], drop_first=True)
-cbsa_dummy.columns = ['cbsa_' + str(col) for col in cbsa_dummy.columns]
-prospecting_table = pd.concat([prospecting_table,cbsa_dummy], axis = 1)
+#URL
+sizes = prospecting_table['BE_Web_Address_URL'].value_counts()
+low_url_codes = sizes.index[sizes < prospecting_table.shape[0]*0.01]
+prospecting_table.loc[prospecting_table['BE_Web_Address_URL'].isin(low_url_codes), 
+                      'BE_Web_Address_URL'] = "other_url_sites"
+url_dummy = pd.get_dummies(prospecting_table['BE_Web_Address_URL'], drop_first=True)
+url_dummy.columns = ['web_address_' + str(col) for col in url_dummy.columns]
+prospecting_table = pd.concat([prospecting_table,url_dummy], axis = 1)
 
 #metro micro indicator
-metro_ind_dummy = pd.get_dummies(prospecting_table['BE Metro Micro Indicator'], drop_first=True)
+metro_ind_dummy = pd.get_dummies(prospecting_table['BE_Metro_Micro_Indicator'], drop_first=True)
 metro_ind_dummy.columns = ['metro_ind_' + str(col) for col in metro_ind_dummy.columns]
 prospecting_table = pd.concat([prospecting_table,metro_ind_dummy], axis = 1)
 
-#csa code
-sizes = prospecting_table['BE CSA Code'].value_counts()
-low_csa_codes = sizes.index[sizes < prospecting_table.shape[0]*0.01]
-prospecting_table.loc[prospecting_table['BE CSA Code'].isin(low_csa_codes), 
-                      'BE CSA Code'] = "other_csa_codes"
-csa_dummy = pd.get_dummies(prospecting_table['BE CSA Code'], drop_first=True)
-csa_dummy.columns = ['csa_' + str(col) for col in csa_dummy.columns]
-prospecting_table = pd.concat([prospecting_table,csa_dummy], axis = 1)
-
 #sic_code
-sizes = prospecting_table['BE Primary SIC Code'].value_counts()
+sizes = prospecting_table['BE_Primary_SIC_Code'].value_counts()
 low_sic_codes = sizes.index[sizes < prospecting_table.shape[0]*0.01]
-prospecting_table.loc[prospecting_table['BE Primary SIC Code'].isin(low_sic_codes), 
-                      'BE Primary SIC Code'] = "other_sic_codes"
-sic_codes_dummy = pd.get_dummies(prospecting_table['BE Primary SIC Code'], drop_first=True)
+prospecting_table.loc[prospecting_table['BE_Primary_SIC_Code'].isin(low_sic_codes), 
+                      'BE_Primary_SIC_Code'] = "other_sic_codes"
+sic_codes_dummy = pd.get_dummies(prospecting_table['BE_Primary_SIC_Code'], drop_first=True)
 sic_codes_dummy.columns = ['sic_codes_' + str(col) for col in sic_codes_dummy.columns]
 prospecting_table = pd.concat([prospecting_table,sic_codes_dummy], axis = 1)
 
 #naics_code
-sizes = prospecting_table['BE NAICS Code8'].value_counts()
+sizes = prospecting_table['BE_NAICS_Code8'].value_counts()
 low_naics_codes = sizes.index[sizes < prospecting_table.shape[0]*0.01]
-prospecting_table.loc[prospecting_table['BE NAICS Code8'].isin(low_naics_codes), 
-                      'BE NAICS Code8'] = "other_naics_codes"
-naics_codes_dummy = pd.get_dummies(prospecting_table['BE NAICS Code8'], drop_first=True)
+prospecting_table.loc[prospecting_table['BE_NAICS_Code8'].isin(low_naics_codes), 
+                      'BE_NAICS_Code8'] = "other_naics_codes"
+naics_codes_dummy = pd.get_dummies(prospecting_table['BE_NAICS_Code8'], drop_first=True)
 naics_codes_dummy.columns = ['naics_codes_' + str(col) for col in naics_codes_dummy.columns]
 prospecting_table = pd.concat([prospecting_table,naics_codes_dummy], axis = 1)
 
 #employment_size_code
-sizes = prospecting_table['BE Location Employment Size Code'].value_counts()
+sizes = prospecting_table['BE_Location_Employment_Size_Code'].value_counts()
 low_employment_codes = sizes.index[sizes < prospecting_table.shape[0]*0.01]
-prospecting_table.loc[prospecting_table['BE Location Employment Size Code'].isin(low_employment_codes), 
-                      'BE Location Employment Size Code'] = "other_employment_size_codes"
-employment_codes_dummy = pd.get_dummies(prospecting_table['BE Location Employment Size Code'], drop_first=True)
+prospecting_table.loc[prospecting_table['BE_Location_Employment_Size_Code'].isin(low_employment_codes), 
+                      'BE_Location_Employment_Size_Code'] = "other_employment_size_codes"
+employment_codes_dummy = pd.get_dummies(prospecting_table['BE_Location_Employment_Size_Code'], drop_first=True)
 employment_codes_dummy.columns = ['employment_size_codes_' + str(col) for col in employment_codes_dummy.columns]
 prospecting_table = pd.concat([prospecting_table,employment_codes_dummy], axis = 1)
 
 #sales volume description
-sizes = prospecting_table['BE Location Sales Volume Description'].value_counts()
-low_sales_vol = sizes.index[sizes < prospecting_table.shape[0]*0.02]
-prospecting_table.loc[prospecting_table['BE Location Sales Volume Description'].isin(low_sales_vol), 
-                      'BE Location Sales Volume Description'] = "other_employment_size_codes"
-sales_vol_dummy = pd.get_dummies(prospecting_table['BE Location Sales Volume Description'], drop_first=True)
+sizes = prospecting_table['BE_Location_Sales_Volume_Description'].value_counts()
+#low_sales_vol = sizes.index[sizes < prospecting_table.shape[0]*0.02]
+#prospecting_table.loc[prospecting_table['BE_Location_Sales_Volume_Description'].isin(low_sales_vol), 
+#                      'BE_Location_Sales_Volume_Description'] = "other_employment_size_codes"
+sales_vol_dummy = pd.get_dummies(prospecting_table['BE_Location_Sales_Volume_Description'], drop_first=True)
 sales_vol_dummy.columns = ['sales_vol_desc_' + str(col) for col in sales_vol_dummy.columns]
 prospecting_table = pd.concat([prospecting_table,sales_vol_dummy], axis = 1)
 
 #business status
-sizes = prospecting_table['BE Business Status Code'].value_counts()
+sizes = prospecting_table['BE_Business_Status_Code'].value_counts()
 low_bus_status = sizes.index[sizes < prospecting_table.shape[0]*0.01]
-prospecting_table.loc[prospecting_table['BE Business Status Code'].isin(low_bus_status), 
-                      'BE Business Status Code'] = "other_business_status_codes"
-bus_status_dummy = pd.get_dummies(prospecting_table['BE Business Status Code'], drop_first=True)
+prospecting_table.loc[prospecting_table['BE_Business_Status_Code'].isin(low_bus_status), 
+                      'BE_Business_Status_Code'] = "other_business_status_codes"
+bus_status_dummy = pd.get_dummies(prospecting_table['BE_Business_Status_Code'], drop_first=True)
 bus_status_dummy.columns = ['business_status_' + str(col) for col in bus_status_dummy.columns]
 prospecting_table = pd.concat([prospecting_table,bus_status_dummy], axis = 1)
 
 #public private code
-sizes = prospecting_table['BE Public Private Code'].value_counts()
+sizes = prospecting_table['BE_Public_Private_Code'].value_counts()
 low_public_codes = sizes.index[sizes < prospecting_table.shape[0]*0.1]
-prospecting_table.loc[prospecting_table['BE Public Private Code'].isin(low_public_codes), 
-                      'BE Public Private Code'] = "other_private_public_codes"
-public_private_dummy = pd.get_dummies(prospecting_table['BE Public Private Code'], drop_first=True)
+prospecting_table.loc[prospecting_table['BE_Public_Private_Code'].isin(low_public_codes), 
+                      'BE_Public_Private_Code'] = "other_private_public_codes"
+public_private_dummy = pd.get_dummies(prospecting_table['BE_Public_Private_Code'], drop_first=True)
 public_private_dummy.columns = ['public_private_' + str(col) for col in public_private_dummy.columns]
 prospecting_table = pd.concat([prospecting_table,public_private_dummy], axis = 1)
 
+#BE_Asset_Size_Indicator
+sizes = prospecting_table['BE_Asset_Size_Indicator'].value_counts()
+low_asset_size_codes = sizes.index[sizes < prospecting_table.shape[0]*0.1]
+prospecting_table.loc[prospecting_table['BE_Asset_Size_Indicator'].isin(low_asset_size_codes), 
+                      'BE_Asset_Size_Indicator'] = "other_low_asset_size_codes"
+low_asset_size_dummy = pd.get_dummies(prospecting_table['BE_Asset_Size_Indicator'], drop_first=True)
+low_asset_size_dummy.columns = ['public_private_' + str(col) for col in low_asset_size_dummy.columns]
+prospecting_table = pd.concat([prospecting_table,low_asset_size_dummy], axis = 1)
+
+
+#BE_Public_Filing_Indicator
+public_filing_dummy = pd.get_dummies(prospecting_table['BE_Public_Filing_Indicator'], drop_first=True)
+public_filing_dummy.columns = ['public_filing_' + str(col) for col in public_filing_dummy.columns]
+prospecting_table = pd.concat([prospecting_table,public_filing_dummy], axis = 1)
+
+#BE_Yellow_Page_Code
+sizes = prospecting_table['BE_Yellow_Page_Code'].value_counts()
+yellow_page_codes = sizes.index[sizes < prospecting_table.shape[0]*0.1]
+prospecting_table.loc[prospecting_table['BE_Yellow_Page_Code'].isin(low_asset_size_codes), 
+                      'BE_Yellow_Page_Code'] = "other_yellow_page_codes"
+yellow_page_dummy = pd.get_dummies(prospecting_table['BE_Yellow_Page_Code'], drop_first=True)
+yellow_page_dummy.columns = ['yellow_page_' + str(col) for col in yellow_page_dummy.columns]
+prospecting_table = pd.concat([prospecting_table, yellow_page_dummy], axis = 1)
+
+#BE_Affluent_Neighborhood_Location_Indicator
+affluent_neighborhood_dummy = pd.get_dummies(prospecting_table['BE_Affluent_Neighborhood_Location_Indicator'], drop_first=True)
+affluent_neighborhood_dummy.columns = ['affluent_neighborhood_' + str(col) for col in affluent_neighborhood_dummy.columns]
+prospecting_table = pd.concat([prospecting_table, affluent_neighborhood_dummy], axis = 1)
+
+#BE_Affluent_Neighborhood_Location_Indicator
+big_business_dummy = pd.get_dummies(prospecting_table['BE_Big_Business_Indicator'], drop_first=True)
+big_business_dummy.columns = ['big_business_' + str(col) for col in big_business_dummy.columns]
+prospecting_table = pd.concat([prospecting_table, big_business_dummy], axis = 1)
+
+#BE_Growing_Shrinking_Indicator
+sizes = prospecting_table['BE_Growing_Shrinking_Indicator'].value_counts()
+growing_shrinking_indicator = sizes.index[sizes < prospecting_table.shape[0]*0.1]
+prospecting_table.loc[prospecting_table['BE_Growing_Shrinking_Indicator'].isin(growing_shrinking_indicator), 
+                      'BE_Growing_Shrinking_Indicator'] = "other_growing_shrinking_indicator_codes"
+growing_shrinking_indicator_dummy = pd.get_dummies(prospecting_table['BE_Growing_Shrinking_Indicator'], drop_first=True)
+growing_shrinking_indicator_dummy.columns = ['growing_shrinking_indicator_' + str(col) for col in growing_shrinking_indicator_dummy.columns]
+prospecting_table = pd.concat([prospecting_table, growing_shrinking_indicator_dummy], axis = 1)
+
+#BE_High_Income_Executive_Indicator
+high_income_dummy = pd.get_dummies(prospecting_table['BE_High_Income_Executive_Indicator'], drop_first=True)
+high_income_dummy.columns = ['high_income_' + str(col) for col in high_income_dummy.columns]
+prospecting_table = pd.concat([prospecting_table, high_income_dummy], axis = 1)
+
+#BE_High_Tech_Business_Indicator
+high_tech_dummy = pd.get_dummies(prospecting_table['BE_High_Tech_Business_Indicator'], drop_first=True)
+high_tech_dummy.columns = ['high_tech_' + str(col) for col in high_tech_dummy.columns]
+prospecting_table = pd.concat([prospecting_table, high_tech_dummy], axis = 1)
+
+#BE_Medium_Business_Entrepreneur_Indicator
+medium_business_dummy = pd.get_dummies(prospecting_table['BE_Medium_Business_Entrepreneur_Indicator'], drop_first=True)
+medium_business_dummy.columns = ['medium_business_' + str(col) for col in medium_business_dummy.columns]
+prospecting_table = pd.concat([prospecting_table, medium_business_dummy], axis = 1)
+
+#BE_Small_Business_Entrepreneur_Indicator
+small_business_dummy = pd.get_dummies(prospecting_table['BE_Small_Business_Entrepreneur_Indicator'], drop_first=True)
+small_business_dummy.columns = ['small_business_' + str(col) for col in small_business_dummy.columns]
+prospecting_table = pd.concat([prospecting_table, small_business_dummy], axis = 1)
+
+
 #prospecting_table["BE Census Tract"] check!!
-prospecting_table.drop(['state', 'city','BE Primary Carrier Route Code','BE County Code',
-       'BE County Description','BE CBSA Code', 'BE CBSA Description','BE Metro Micro Indicator',
-       'BE CSA Code', 'BE CSA Description', 'BE Census Tract','BE Selected SIC Code', 'BE Primary SIC Code', 
-       'BE Secondary SIC Code 1', 'BE NAICS Code8', 'BE Location Employment Size Code',
-       'BE Actual Location Employment Size5','BE Modeled Employment Size Indicator', 
-       'BE Location Sales Volume Code','BE Location Sales Volume Code',
-       'BE Location Sales Volume Description','BE Actual Location Sales Volume', 'BE Business Status Code',
-       'BE Business Status Description', 'BE Public Private Code','BE Public Filing Indicator', 
-       'BE Individual Firm Code', 'BE Individual Firm Description'], axis =1, inplace =True)
-
-#dropping these columns because they are unrelated
-prospecting_table.drop(['BE Block Group', 'BE Asset Size Indicator', 'BE Yellow Page Code', 
-                        'BE Business Credit Score Code2', 'BE Ad Size Code','BE Ad Size Description',
-                        'BE Square Footage8','BE Building Number of Multi Tenant Location',
-                        'BE Affluent Neighborhood Location Indicator','BE Big Business Indicator',
-                        'BE Female Business Exec Owner Indicator','BE Growing Shrinking Indicator',
-                        'BE High Income Executive Indicator','BE High Tech Business Indicator',
-                        'BE Medium Business Entrepreneur Indicator','BE Small Business Entrepreneur Indicator',
-                        'BE White Collar Percentage Formatted','BE White Collar Indicator',
-                        'BE 1849 Record Marker'], axis =1, inplace =True)
+prospecting_table.drop(['BE_Telephone_NumberF1', 'BE_Web_Address_URL', 'BE_Primary_SIC_Code', 
+                        'BE_Secondary_SIC_Code_1', 'BE_CSA_Description', 'BE_Location_Employment_Size_Code',
+                        'BE_Location_Sales_Volume_Code', 
+                        'BE_Asset_Size_Indicator', 'BE_ABI_Number', 'BE_Business_Status_Code', 
+                        'BE_Business_Status_Description', 'BE_Public_Private_Code', 'BE_Public_Filing_Indicator',
+                        'BE_Individual_Firm_Code', 'BE_Individual_Firm_Description', 'BE_Yellow_Page_Code', 
+                        'BE_Business_Credit_Score_Code2', 'BE_Affluent_Neighborhood_Location_Indicator', 
+                        'BE_Big_Business_Indicator', 'BE_Female_Business_Exec_Owner_Indicator', 
+                        'BE_Growing_Shrinking_Indicator', 'BE_High_Income_Executive_Indicator', 
+                        'BE_High_Tech_Business_Indicator', 'BE_Medium_Business_Entrepreneur_Indicator', 
+                        'BE_Small_Business_Entrepreneur_Indicator', 'BE_White_Collar_Indicator', 
+                        'BE_1849_Record_Marker', 'BE_Modeled_Employment_Size_Indicator', 
+                        'BE_Location_Sales_Volume_Description', 'BE_NAICS_Code8'], axis =1, inplace =True)
 
 
-#temp = prospecting_table[['CustomerGroup','AF_Yr17', 'Lubes_Yr17','Total Rev.', 'city','state','BE Selected SIC Code',
-#                          'BE NAICS Code8','BE Location Employment Size Code','BE Actual Location Employment Size5',
-#                          'BE Location Sales Volume Code','BE Location Sales Volume Description', 
-#                          'BE Affluent Neighborhood Location Indicator', 'BE Big Business Indicator','BE Growing Shrinking Indicator',
-#                          'BE White Collar Percentage Formatted']]
-
-#prospecting_table = pd.merge(prospecting_table, dedup_file, 
-#                             left_on = 'CustomerEnterpriseKey', right_on = 'CustomerEnterpriseKey', how = 'left')
-#prospecting_table.drop(['CustomerName'], axis = 1, inplace = True)
-
-#temp = temp[temp.AF_Yr17 > 0]
-#temp = temp[temp.Lubes_Yr17 > 0]
-#temp =temp[temp['Total Rev.'] >0]
-#temp['log_af_yr17'] = np.log(temp.AF_Yr17)
-#temp['log_lubes_yr17'] = np.log(temp.Lubes_Yr17)
-#temp['log_total_rev'] = np.log(temp['Total Rev.'])
-#temp['log_location_emp'] = np.log(temp['BE Actual Location Employment Size5'])
-#
-#temp.drop(['AF_Yr17', 'Lubes_Yr17', 'Total Rev.',
-#       'BE Actual Location Employment Size5'], axis = 1, inplace = True)
 temp = prospecting_table.dropna()
-temp.CustomerGroup.value_counts()
-#AF       15914
-#Both       974
-#Lubes      579
-temp_keys = temp[['CustomerEnterpriseKey', 'CustomerKey_y']]
-temp.drop(['CustomerEnterpriseKey', 'CustomerKey_y'], axis = 1, inplace= True)
-temp = temp[temp.CustomerGroup == 'Both']
-# drop additional non useful variables
-temp.drop(['Lubes Combined', 'AF_Yr16','Gain_Yr16', 'Oil_Yr16', 'PE_Yr16', 'AF_Yr17', 
-           'Gain_Yr17', 'Oil_Yr17', 'PE_Yr17', 'AF_Yr18', 'Gain_Yr18', 'Oil_Yr18',
-           'PE_Yr18', 'Total Rev.'],axis = 1, inplace = True)
-X = temp.drop(['CustomerGroup'], axis = 1)
-X_train = X.iloc[:700,:]
-X_test = X.iloc[700:,:]
+temp.reset_index(drop=True, inplace=True)
+temp_keys = temp[['source', 'sourcesystemid', 'BE_Company_Name']]
+temp.drop(['source', 'sourcesystemid', 'BE_Company_Name'], axis = 1, inplace= True)
+X_train = temp
+#X_train = temp.iloc[:700,:]
+#X_test = temp.iloc[700:,:]
 
 # fit the model
-rng = np.random.RandomState(1235)
+rng = np.random.RandomState(158563)
 clf = IsolationForest(behaviour='new', max_samples=100,
                       random_state=rng, contamination='auto')
 clf.fit(X_train)
@@ -355,12 +289,304 @@ y_pred_train_probas = clf.decision_function(X_train)
 #Train set distribution
 n, bins, patches = plt.hist(y_pred_train_probas)
 plt.show()
+
+#############################################################################
+
+temp = pd.concat([temp, 
+                  pd.Series(y_pred_train_probas)], axis= 1)
+temp.rename(columns={ temp.columns[-1]: "prospect" }, inplace = True)
+temp['result'] = np.where(temp.prospect > 0, 1, 0)
+
+#since very few of the customers are non prospects, lets add the non 
+# prospects artificially
+from imblearn.over_sampling import SMOTE 
+#x_train, x_val, y_train, y_val = train_test_split(temp, temp[-1],
+#                                                  test_size = 0,
+#                                                  random_state=12)
+sm = SMOTE(random_state=12, ratio = 1.0)
+x_train_res, y_train_res = sm.fit_sample(X_train, temp['result'])
+balanced_dataset = pd.concat([pd.DataFrame(x_train_res), pd.Series(y_train_res)], axis = 1)
+temp.drop('prospect', axis =1 , inplace = True)
+balanced_dataset.columns = temp.columns
+balanced_dataset.to_csv('prospect_list_datarobot.csv')
+#############################################################################
+
+
 # Test set distribution
 y_pred_test = clf.predict(X_test)
 y_predict_probas = clf.decision_function(X_test)
 n, bins, patches = plt.hist(y_predict_probas)
 plt.show()
+
+#############################################################################################################
 #now lets predict our prospects
+kristen_list = pd.read_csv('prospect_list.csv')
+kristen_list['BE_Primary_SIC_Code'] = kristen_list['BE_Primary_SIC_Code'].astype(str)
+kristen_list['BE_Primary_SIC_Code'] = kristen_list['BE_Primary_SIC_Code'].str[:4]
+kristen_list['BE_NAICS_Code8'] = kristen_list['BE_NAICS_Code8'].astype(str)
+kristen_list['BE_NAICS_Code8'] = kristen_list['BE_NAICS_Code8'].str[:6]
+
+prospecting_table = kristen_list
+
+#data cleanup
+prospecting_table = prospecting_table.drop(prospecting_table.columns[2:17],1) #check this line!!
+
+prospecting_table.drop(['MailingAddress2', 'MailingCity', 'MailingState', 
+                        'ZipCode', 'Zip4', 'MailingCountry', 'BE_Match_Level', 
+                        'BE_Match_Score', 'BE_Record_Type_Code', 'BE_Contact_Manager','BE_Selected_SIC_Description', 
+                        'BE_Franchise_Specialty_Description1', 'BE_Franchise_Specialty_Description2', 
+                        'BE_Franchise_Specialty_Description3', 'BE_Franchise_Specialty_Description4', 
+                        'BE_Franchise_Specialty_Description5', 'BE_Franchise_Specialty_Code6',
+                        'BE_Franchise_Specialty_Description6', 'BE_Primary_SIC_Description', 
+                        'BE_Secondary_SIC_Description_1', 'BE_Secondary_SIC_Description_2', 
+                        'BE_Secondary_SIC_Description_3', 'BE_Secondary_SIC_Description_4', 
+                        'BE_NAICS_Description', 'BE_Location_Employment_Size_Description', 
+                        'BE_Corporate_Employment_Size_Description', 'BE_Selected_SIC_Code'], axis = 1, inplace = True)
+
+
+#drop additional columns that were dropped in the previous iteration
+prospecting_table.drop(['BE_Production_Date','BE_Obsolescence_Date', 'BE_Production_Date_Formatted', 
+                        'BE_Source', 'BE_Book_Number'], axis=1, inplace= True)
+    
+#Dropping the lubes variables because the customers that we are interested in as prospects wont have any Lubes sales
+prospecting_table = prospecting_table.loc[:, ~prospecting_table.columns.str.startswith('BE_Contact')]
+prospecting_table.dropna(thresh=prospecting_table.shape[0]*0.5, how='all', axis=1, inplace = True)
+
+#recode the fields 'BE_Year_SIC_Added_to_Record', 'BE Year First Appeared in Yellow Pages', 'BE Year Established', '
+prospecting_table['BE_yellow_pages_number_of_years'] = 2019 - prospecting_table['BE_Year_First_Appeared_in_Yellow_Pages']
+
+#subsequently drop the above fields
+prospecting_table.drop(['BE_Year_First_Appeared_in_Yellow_Pages'],axis=1,inplace=True)
+
+
+prospecting_table.drop([ 'BE_Site_Number', 'BE_Tele_Research_Date',
+                        'BE_Call_Status_Code','BE_Call_Status_Description',
+                        'BE_Business_Credit_Score_Description', 'BE_Delivery_Point_Bar_Code'], axis = 1, inplace = True)
+
+#drop the geographic information since this  information will not matter if prospecting in a different territory
+prospecting_table.drop(['BE_Primary_Address', 'BE_Primary_City_Name', 'BE_Primary_State_Abbreviation', 
+                        'BE_Primary_ZIP_Code', 'BE_Primary_ZIP4_Code', 'BE_Primary_ZIP_Code_Plus_4', 
+                        'BE_Primary_Carrier_Route_Code', 'BE_Primary_State_Code', 
+                        'BE_County_Code', 'BE_County_Description', 'BE_CBSA_Code', 'BE_CBSA_Description', 
+                        'BE_CSA_Code'], axis = 1, inplace = True)
+    
+    
+#add in the abi number and the related fields   
+sizes = prospecting_table['BE_ABI_Number'].value_counts()
+low_abi = sizes.index[sizes < prospecting_table.shape[0]*0.01]
+prospecting_table.loc[prospecting_table['BE_ABI_Number'].isin(low_abi), 'BE_ABI_Number'] = "other_abi_busiinesses"
+abi_dummy = pd.get_dummies(prospecting_table.BE_ABI_Number, drop_first=True)
+abi_dummy.columns = ['abi_' + str(col) for col in abi_dummy.columns]
+prospecting_table = pd.concat([prospecting_table,abi_dummy], axis = 1)
+
+#URL
+sizes = prospecting_table['BE_Web_Address_URL'].value_counts()
+low_url_codes = sizes.index[sizes < prospecting_table.shape[0]*0.01]
+prospecting_table.loc[prospecting_table['BE_Web_Address_URL'].isin(low_url_codes), 
+                      'BE_Web_Address_URL'] = "other_url_sites"
+url_dummy = pd.get_dummies(prospecting_table['BE_Web_Address_URL'], drop_first=True)
+url_dummy.columns = ['web_address_' + str(col) for col in url_dummy.columns]
+prospecting_table = pd.concat([prospecting_table,url_dummy], axis = 1)
+
+#metro micro indicator
+metro_ind_dummy = pd.get_dummies(prospecting_table['BE_Metro_Micro_Indicator'], drop_first=True)
+metro_ind_dummy.columns = ['metro_ind_' + str(col) for col in metro_ind_dummy.columns]
+prospecting_table = pd.concat([prospecting_table,metro_ind_dummy], axis = 1)
+
+#sic_code
+sizes = prospecting_table['BE_Primary_SIC_Code'].value_counts()
+low_sic_codes = sizes.index[sizes < prospecting_table.shape[0]*0.01]
+prospecting_table.loc[prospecting_table['BE_Primary_SIC_Code'].isin(low_sic_codes), 
+                      'BE_Primary_SIC_Code'] = "other_sic_codes"
+sic_codes_dummy = pd.get_dummies(prospecting_table['BE_Primary_SIC_Code'], drop_first=True)
+sic_codes_dummy.columns = ['sic_codes_' + str(col) for col in sic_codes_dummy.columns]
+prospecting_table = pd.concat([prospecting_table,sic_codes_dummy], axis = 1)
+
+#naics_code
+sizes = prospecting_table['BE_NAICS_Code8'].value_counts()
+low_naics_codes = sizes.index[sizes < prospecting_table.shape[0]*0.01]
+prospecting_table.loc[prospecting_table['BE_NAICS_Code8'].isin(low_naics_codes), 
+                      'BE_NAICS_Code8'] = "other_naics_codes"
+naics_codes_dummy = pd.get_dummies(prospecting_table['BE_NAICS_Code8'], drop_first=True)
+naics_codes_dummy.columns = ['naics_codes_' + str(col) for col in naics_codes_dummy.columns]
+prospecting_table = pd.concat([prospecting_table,naics_codes_dummy], axis = 1)
+
+#employment_size_code
+sizes = prospecting_table['BE_Location_Employment_Size_Code'].value_counts()
+low_employment_codes = sizes.index[sizes < prospecting_table.shape[0]*0.01]
+prospecting_table.loc[prospecting_table['BE_Location_Employment_Size_Code'].isin(low_employment_codes), 
+                      'BE_Location_Employment_Size_Code'] = "other_employment_size_codes"
+employment_codes_dummy = pd.get_dummies(prospecting_table['BE_Location_Employment_Size_Code'], drop_first=True)
+employment_codes_dummy.columns = ['employment_size_codes_' + str(col) for col in employment_codes_dummy.columns]
+prospecting_table = pd.concat([prospecting_table,employment_codes_dummy], axis = 1)
+
+#sales volume description
+sizes = prospecting_table['BE_Location_Sales_Volume_Description'].value_counts()
+low_sales_vol = sizes.index[sizes < prospecting_table.shape[0]*0.02]
+prospecting_table.loc[prospecting_table['BE_Location_Sales_Volume_Description'].isin(low_sales_vol), 
+                      'BE_Location_Sales_Volume_Description'] = "other_employment_size_codes"
+sales_vol_dummy = pd.get_dummies(prospecting_table['BE_Location_Sales_Volume_Description'], drop_first=True)
+sales_vol_dummy.columns = ['sales_vol_desc_' + str(col) for col in sales_vol_dummy.columns]
+prospecting_table = pd.concat([prospecting_table,sales_vol_dummy], axis = 1)
+
+#business status
+sizes = prospecting_table['BE_Business_Status_Code'].value_counts()
+low_bus_status = sizes.index[sizes < prospecting_table.shape[0]*0.01]
+prospecting_table.loc[prospecting_table['BE_Business_Status_Code'].isin(low_bus_status), 
+                      'BE_Business_Status_Code'] = "other_business_status_codes"
+bus_status_dummy = pd.get_dummies(prospecting_table['BE_Business_Status_Code'], drop_first=True)
+bus_status_dummy.columns = ['business_status_' + str(col) for col in bus_status_dummy.columns]
+prospecting_table = pd.concat([prospecting_table,bus_status_dummy], axis = 1)
+
+#public private code
+sizes = prospecting_table['BE_Public_Private_Code'].value_counts()
+low_public_codes = sizes.index[sizes < prospecting_table.shape[0]*0.1]
+prospecting_table.loc[prospecting_table['BE_Public_Private_Code'].isin(low_public_codes), 
+                      'BE_Public_Private_Code'] = "other_private_public_codes"
+public_private_dummy = pd.get_dummies(prospecting_table['BE_Public_Private_Code'], drop_first=True)
+public_private_dummy.columns = ['public_private_' + str(col) for col in public_private_dummy.columns]
+prospecting_table = pd.concat([prospecting_table,public_private_dummy], axis = 1)
+
+#BE_Asset_Size_Indicator
+sizes = prospecting_table['BE_Asset_Size_Indicator'].value_counts()
+low_asset_size_codes = sizes.index[sizes < prospecting_table.shape[0]*0.1]
+prospecting_table.loc[prospecting_table['BE_Asset_Size_Indicator'].isin(low_asset_size_codes), 
+                      'BE_Asset_Size_Indicator'] = "other_low_asset_size_codes"
+low_asset_size_dummy = pd.get_dummies(prospecting_table['BE_Asset_Size_Indicator'], drop_first=True)
+low_asset_size_dummy.columns = ['public_private_' + str(col) for col in low_asset_size_dummy.columns]
+prospecting_table = pd.concat([prospecting_table,low_asset_size_dummy], axis = 1)
+
+
+#BE_Public_Filing_Indicator
+public_filing_dummy = pd.get_dummies(prospecting_table['BE_Public_Filing_Indicator'], drop_first=True)
+public_filing_dummy.columns = ['public_filing_' + str(col) for col in public_filing_dummy.columns]
+prospecting_table = pd.concat([prospecting_table,public_filing_dummy], axis = 1)
+
+#BE_Yellow_Page_Code
+sizes = prospecting_table['BE_Yellow_Page_Code'].value_counts()
+yellow_page_codes = sizes.index[sizes < prospecting_table.shape[0]*0.1]
+prospecting_table.loc[prospecting_table['BE_Yellow_Page_Code'].isin(low_asset_size_codes), 
+                      'BE_Yellow_Page_Code'] = "other_yellow_page_codes"
+yellow_page_dummy = pd.get_dummies(prospecting_table['BE_Yellow_Page_Code'], drop_first=True)
+yellow_page_dummy.columns = ['yellow_page_' + str(col) for col in yellow_page_dummy.columns]
+prospecting_table = pd.concat([prospecting_table, yellow_page_dummy], axis = 1)
+
+#BE_Affluent_Neighborhood_Location_Indicator
+affluent_neighborhood_dummy = pd.get_dummies(prospecting_table['BE_Affluent_Neighborhood_Location_Indicator'], drop_first=True)
+affluent_neighborhood_dummy.columns = ['affluent_neighborhood_' + str(col) for col in affluent_neighborhood_dummy.columns]
+prospecting_table = pd.concat([prospecting_table, affluent_neighborhood_dummy], axis = 1)
+
+#BE_Affluent_Neighborhood_Location_Indicator
+big_business_dummy = pd.get_dummies(prospecting_table['BE_Big_Business_Indicator'], drop_first=True)
+big_business_dummy.columns = ['big_business_' + str(col) for col in big_business_dummy.columns]
+prospecting_table = pd.concat([prospecting_table, big_business_dummy], axis = 1)
+
+#BE_Growing_Shrinking_Indicator
+sizes = prospecting_table['BE_Growing_Shrinking_Indicator'].value_counts()
+growing_shrinking_indicator = sizes.index[sizes < prospecting_table.shape[0]*0.1]
+prospecting_table.loc[prospecting_table['BE_Growing_Shrinking_Indicator'].isin(growing_shrinking_indicator), 
+                      'BE_Growing_Shrinking_Indicator'] = "other_growing_shrinking_indicator_codes"
+growing_shrinking_indicator_dummy = pd.get_dummies(prospecting_table['BE_Growing_Shrinking_Indicator'], drop_first=True)
+growing_shrinking_indicator_dummy.columns = ['growing_shrinking_indicator_' + str(col) for col in growing_shrinking_indicator_dummy.columns]
+prospecting_table = pd.concat([prospecting_table, growing_shrinking_indicator_dummy], axis = 1)
+
+#BE_High_Income_Executive_Indicator
+high_income_dummy = pd.get_dummies(prospecting_table['BE_High_Income_Executive_Indicator'], drop_first=True)
+high_income_dummy.columns = ['high_income_' + str(col) for col in high_income_dummy.columns]
+prospecting_table = pd.concat([prospecting_table, high_income_dummy], axis = 1)
+
+#BE_High_Tech_Business_Indicator
+high_tech_dummy = pd.get_dummies(prospecting_table['BE_High_Tech_Business_Indicator'], drop_first=True)
+high_tech_dummy.columns = ['high_tech_' + str(col) for col in high_tech_dummy.columns]
+prospecting_table = pd.concat([prospecting_table, high_tech_dummy], axis = 1)
+
+#BE_Medium_Business_Entrepreneur_Indicator
+medium_business_dummy = pd.get_dummies(prospecting_table['BE_Medium_Business_Entrepreneur_Indicator'], drop_first=True)
+medium_business_dummy.columns = ['medium_business_' + str(col) for col in medium_business_dummy.columns]
+prospecting_table = pd.concat([prospecting_table, medium_business_dummy], axis = 1)
+
+#BE_Small_Business_Entrepreneur_Indicator
+small_business_dummy = pd.get_dummies(prospecting_table['BE_Small_Business_Entrepreneur_Indicator'], drop_first=True)
+small_business_dummy.columns = ['small_business_' + str(col) for col in small_business_dummy.columns]
+prospecting_table = pd.concat([prospecting_table, small_business_dummy], axis = 1)
+
+
+#prospecting_table["BE Census Tract"] check!!
+prospecting_table.drop(['BE_Telephone_NumberF1', 'BE_Web_Address_URL', 'BE_Primary_SIC_Code', 
+                        'BE_Secondary_SIC_Code_1', 'BE_CSA_Description', 'BE_Location_Employment_Size_Code',
+                        'BE_Location_Sales_Volume_Code', 
+                        'BE_Asset_Size_Indicator', 'BE_ABI_Number', 'BE_Business_Status_Code', 
+                        'BE_Business_Status_Description', 'BE_Public_Private_Code', 'BE_Public_Filing_Indicator',
+                        'BE_Individual_Firm_Code', 'BE_Individual_Firm_Description', 'BE_Yellow_Page_Code', 
+                        'BE_Business_Credit_Score_Code2', 'BE_Affluent_Neighborhood_Location_Indicator', 
+                        'BE_Big_Business_Indicator', 'BE_Female_Business_Exec_Owner_Indicator', 
+                        'BE_Growing_Shrinking_Indicator', 'BE_High_Income_Executive_Indicator', 
+                        'BE_High_Tech_Business_Indicator', 'BE_Medium_Business_Entrepreneur_Indicator', 
+                        'BE_Small_Business_Entrepreneur_Indicator', 'BE_White_Collar_Indicator', 
+                        'BE_1849_Record_Marker', 'BE_Modeled_Employment_Size_Indicator', 
+                        'BE_Location_Sales_Volume_Description', 'BE_NAICS_Code8'], axis =1, inplace =True)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 af_prospects = prospecting_table.dropna()
 af_prospects = af_prospects[af_prospects.CustomerGroup == 'AF']
 af_prospects.drop(['Lubes Combined', 'AF_Yr16','Gain_Yr16', 'Oil_Yr16', 'PE_Yr16', 'AF_Yr17', 
